@@ -1,24 +1,9 @@
-"""
-sweep.py
-"""
 # ==== Packages ====
 import argparse
 import subprocess
 import numpy as np
 import os
 import shutil
-
-
-def get_files(directories):
-    """Snapshot all files currently in the given directories."""
-    files = set()
-    for d in directories:
-        if os.path.exists(d):
-            for root, _, filenames in os.walk(d):
-                for f in filenames:
-                    files.add(os.path.join(root, f))
-    return files
-
 
 def main():
     # ==== Command-line Arguments ====
@@ -46,7 +31,7 @@ def main():
     os.makedirs(sweep_results_dir, exist_ok=True)
     print(f"Sweep results will be saved to: {sweep_results_dir}/")
 
-    # Directories the finetune script writes to
+    # ==== Directories the finetune script writes to ====
     watched_dirs = [
         os.path.join("experiments", "results", "test"),
         os.path.join("models", args.dataset_name)
@@ -61,12 +46,16 @@ def main():
     while i < len(args.train_size):
         pct = args.train_size[i]
 
-        # Slice and save subset
+        # ==== Slice and save subset ====
         n = max(1, int(pct / 100 * total))
         subset_filename = f"subset_{pct}pct.npy"
-        subset_path = os.path.join(dataset_dir, subset_filename)
-        print(f"\nSaving {pct}% subset ({n}/{total} samples) to {subset_path}...")
-        np.save(subset_path, dataset[:n])
+        subset_path = os.path.join("datasets", subset_filename)
+
+        if not os.path.exists(subset_path):
+            print(f"Creating subset: {subset_filename} (n={n})")
+            np.save(subset_path, dataset[:n])
+        else:
+            print(f"Subset already exists: {subset_filename}")
 
         j = 0
         while j < len(args.epoch_range):
@@ -82,57 +71,51 @@ def main():
                 shutil.rmtree(models_dataset_dir)
             os.makedirs(models_dataset_dir, exist_ok=True)
 
-            # Snapshot files before run
-            files_before = get_files(watched_dirs)
-
             command = [
                 "python", "scripts/finetune_MORPH_general.py",
-                "--dataset", os.path.join(os.path.dirname(args.dataset), subset_filename),
+                "--dataset", subset_filename,
                 "--dataset_name", args.dataset_name,
                 "--dataset_specs", "2", "1", "1", "128", "128",
                 "--model_choice", "FM",
                 "--model_size", args.model_size,
                 "--ckpt_from", "FM",
+                "--checkpoint", f"morph-{args.model_size}-FM-max_ar1_ep225.pth",
                 "--ft_level1",
                 "--parallel", "no",
                 "--n_epochs", str(epochs),
-                "--rank_lora_attn", "16",
-                "--lr", "0.0001",
-                "--weight_decay", "0.0",
-                "--download_model"
+                "--n_traj", "100",
+                "--patience", "10",
+                "--lr_scheduler",
+                "--rollout_horizon", "50"
             ]
 
             subprocess.run(command)
 
-            # Create iteration results folder
+            # ==== Create iteration results folder ====
             run_folder = os.path.join(sweep_results_dir, f"{pct}percent",
                                       f"{args.model_size}_{pct}percent_{epochs}epochs")
             os.makedirs(run_folder, exist_ok=True)
 
             for d in watched_dirs:
                 if os.path.exists(d):
-                    # --- NEW LOGIC: Filter for the best model only ---
+                    # ==== Filter for the best model only ====
                     all_files = []
                     for root, _, filenames in os.walk(d):
                         for f in filenames:
                             all_files.append(os.path.join(root, f))
 
-                    # Isolate .pth files to find the "best" one
+                    # ==== Isolate .pth files to find the "best" one ====
                     pth_files = [f for f in all_files if f.endswith('.pth')]
 
                     if pth_files:
-                        # The script saves every time loss improves,
-                        # so the highest epoch number is the best/latest one.
-                        # This sorts by filename; '..._ep10.pth' > '..._ep2.pth'
                         best_model = sorted(pth_files, key=lambda x: os.path.getmtime(x))[-1]
 
-                        # Remove all other .pth files so they aren't copied
+                        # ==== Remove all other .pth files so they aren't copied ====
                         for pth in pth_files:
                             if pth != best_model:
                                 os.remove(pth)
-                    # --------------------------------------------------
 
-                    # Now copy the remaining files (Best Model + Metrics + Plots)
+                    # ==== Copy the remaining files (Best Model + Metrics + Plots) ====
                     for root, _, filenames in os.walk(d):
                         for f in filenames:
                             src_path = os.path.join(root, f)
@@ -140,15 +123,10 @@ def main():
 
                     shutil.rmtree(d)
                     os.makedirs(d, exist_ok=True)
-
-            
-            print(f"\nSaved all output files to {run_folder}/ and cleared watched dirs.")
-
             j += 1
         i += 1
 
     print(f"\nSweep complete. {total_runs} runs finished. Results in {sweep_results_dir}/")
-
 
 if __name__ == '__main__':
     main()
