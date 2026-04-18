@@ -1,0 +1,20 @@
+# --- Ignore specific large/private folders ---
+data/
+datasets/
+models/
+experiments/results/
+experiments/heat/
+sweep_results/
+
+# --- Catch-all for large ML/Data files anywhere ---
+*.pth
+*.pt
+*.npy
+*.nc
+*.zip
+*.tar.gz
+
+# --- Ignore Python bytecode files ---
+**/__pycache__/
+*.py[cod]
+*$py.class
