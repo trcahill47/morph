@@ -47,7 +47,7 @@ def convert_nc_to_npy(nc_path: Path, out_dir: Path):
         def walk(grp, prefix):
             for vname, var in grp.variables.items():
                 arr = _to_plain_ndarray(var)
-                name = nc_path.stem
+                name = f"{nc_path.stem}_{vname}"
                 np.save(out_dir / f"{name}.npy", arr)
             for gname, sub in grp.groups.items():
                 walk(sub, prefix + [gname])
