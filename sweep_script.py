@@ -85,7 +85,6 @@ def main():
                 "--ft_level1",
                 "--parallel", "no",
                 "--n_epochs", str(epochs),
-                "--n_traj", "100",
                 "--patience", "10",
                 "--lr_scheduler",
                 "--rollout_horizon", str(args.rollout)
