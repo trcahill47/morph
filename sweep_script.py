@@ -17,6 +17,8 @@ def main():
                         help="Training dataset percentage iteration range. (Ex: 25 50 75 100)")
     parser.add_argument("--epoch_range", nargs="*", type=int, required=True,
                         help="Epoch iteration range. (Ex: 10 50 100 200)")
+    parser.add_argument("--rollout", type=int, required=True,
+                        help="Rollout Horizon")
     args = parser.parse_args()
 
     # ==== Load dataset ====
@@ -86,7 +88,7 @@ def main():
                 "--n_traj", "100",
                 "--patience", "10",
                 "--lr_scheduler",
-                "--rollout_horizon", "50"
+                "--rollout_horizon", args.rollout
             ]
 
             subprocess.run(command)
