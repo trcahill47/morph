@@ -81,7 +81,7 @@ def main():
                 "--model_choice", "FM",
                 "--model_size", args.model_size,
                 "--ckpt_from", "FM",
-                "--checkpoint", f"morph-{args.model_size}-FM-max_ar1_ep225.pth",
+                "--download_model", # <-- Let the finetune script handle the download
                 "--ft_level1",
                 "--parallel", "no",
                 "--n_epochs", str(epochs),
