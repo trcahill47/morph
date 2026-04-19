@@ -88,7 +88,7 @@ def main():
                 "--n_traj", "100",
                 "--patience", "10",
                 "--lr_scheduler",
-                "--rollout_horizon", args.rollout
+                "--rollout_horizon", str(args.rollout)
             ]
 
             subprocess.run(command)
