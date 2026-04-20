@@ -19,6 +19,8 @@ def main():
                         help="Epoch iteration range. (Ex: 10 50 100 200)")
     parser.add_argument("--rollout", type=int, required=True,
                         help="Rollout Horizon")
+    parser.add_argument("--max_ar_order", type=int, default=1,
+                        help="Max autoregressive order for the model")
     args = parser.parse_args()
 
     # ==== Load dataset ====
@@ -87,7 +89,8 @@ def main():
                 "--n_epochs", str(epochs),
                 "--patience", "10",
                 "--lr_scheduler",
-                "--rollout_horizon", str(args.rollout)
+                "--rollout_horizon", str(args.rollout),
+                "--max_ar_order", str(args.max_ar_order)
             ]
 
             subprocess.run(command)
