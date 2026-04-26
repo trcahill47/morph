@@ -1,136 +1,353 @@
 # ==== Packages ====
+
 import argparse
+
 import subprocess
+
 import numpy as np
+
 import os
-import shutil
+
+
+
+# ============================================================
+
+# sweep_script.py
+
+#
+
+# Two modes:
+
+#   --sweep_mode fraction  : outer loop over data %, fixed epochs.
+
+#                            One .pth saved per data % (best val).
+
+#   --sweep_mode epochs    : single data %, checkpoints every N epochs.
+
+#                            One .pth saved per checkpoint.
+
+#
+
+# In both modes:
+
+#   - All PNG generation is suppressed inside finetune (--sweep_mode flag)
+
+#   - One master_metrics.csv per dataset accumulates all rows
+
+#   - Models saved to sweep_results/{dataset}/models/{model_size}/{fraction|epoch}_sweep/
+
+#   - Full dataset passed to finetune each run; --n_traj slices in memory (no subset files)
+
+# ============================================================
+
+
 
 def main():
-    # ==== Command-line Arguments ====
+
     parser = argparse.ArgumentParser()
+
     parser.add_argument("--model_size", type=str, required=True,
-                        help="MORPH model size being used. (Ex: tiny, small, medium, large)")
-    parser.add_argument("--dataset", type=str, required=True, help="PDE dataset path. (Ex: ./place_holder)")
+
+                        help="MORPH model size: Ti, S, M, L")
+
+    parser.add_argument("--dataset", type=str, required=True,
+
+                        help="Dataset filename relative to datasets/. e.g. fns-kf/solution_0.npy")
+
     parser.add_argument("--dataset_name", type=str, required=True,
-                        help="Short name for the dataset. (Ex: fns-kf)")
-    parser.add_argument("--train_size", nargs="*", type=int, required=True,
-                        help="Training dataset percentage iteration range. (Ex: 25 50 75 100)")
-    parser.add_argument("--epoch_range", nargs="*", type=int, required=True,
-                        help="Epoch iteration range. (Ex: 10 50 100 200)")
+
+                        help="Short name for the dataset. e.g. fns-kf")
+
+    parser.add_argument("--sweep_mode", type=str, required=True,
+
+                        choices=["fraction", "epochs"],
+
+                        help="fraction: vary data pct, fixed epochs. "
+
+                             "epochs: fixed data pct, vary checkpoint intervals.")
+
+
+
+    # Fraction-mode arguments
+
+    parser.add_argument("--train_sizes", nargs="*", type=int, default=[],
+
+                        help="[fraction mode] List of training data percentages. e.g. 5 10 15 20")
+
+    parser.add_argument("--n_epochs", type=int, default=20,
+
+                        help="[fraction mode] Total epochs to train per data-pct run.")
+
+
+
+    # Epoch-mode arguments
+
+    parser.add_argument("--train_pct", type=int, default=15,
+
+                        help="[epoch mode] Fixed data percentage to use.")
+
+    parser.add_argument("--max_epochs", type=int, default=25,
+
+                        help="[epoch mode] Max epochs to train.")
+
+    parser.add_argument("--checkpoint_every", type=int, default=5,
+
+                        help="[epoch mode] Evaluate and save .pth every N epochs.")
+
+
+
+    # Shared arguments
+
     parser.add_argument("--rollout", type=int, required=True,
-                        help="Rollout Horizon")
+
+                        help="Rollout horizon for evaluation.")
+
     parser.add_argument("--max_ar_order", type=int, default=1,
-                        help="Max autoregressive order for the model")
+
+                        help="Max autoregressive order. Use 16 for model size L.")
+
+    parser.add_argument("--patience", type=int, default=10,
+
+                        help="Early stopping patience (passed to finetune).")
+
+    parser.add_argument("--dataset_specs", nargs=5, type=int,
+
+                        metavar='N',
+
+                        default=[2, 1, 1, 128, 128],
+
+                        help="Dataset specs: fields components depth height width. "
+
+                             "Default 2 1 1 128 128 for fns-kf. Override for SWE.")
+
+
+
     args = parser.parse_args()
 
-    # ==== Load dataset ====
+
+
+    # ----- Paths -----
+
     dataset_full_path = os.path.join("datasets", args.dataset)
+
     print(f"Loading dataset from {dataset_full_path}...")
+
     dataset = np.load(dataset_full_path, mmap_mode="r")
-    total = dataset.shape[0]
-    print(f"Total samples: {total}")
 
-    # ==== Create top-level results folder ====
-    sweep_results_dir = os.path.join("sweep_results", args.dataset_name, args.model_size)
-    os.makedirs(sweep_results_dir, exist_ok=True)
-    print(f"Sweep results will be saved to: {sweep_results_dir}/")
+    total_samples = dataset.shape[0]
 
-    # ==== Directories the finetune script writes to ====
-    watched_dirs = [
-        os.path.join("experiments", "results", "test"),
-        os.path.join("models", args.dataset_name)
-    ]
+    print(f"Total samples in dataset: {total_samples}")
 
-    # ==== Sweep ====
-    dataset_dir = os.path.dirname(dataset_full_path)
-    total_runs = len(args.train_size) * len(args.epoch_range)
-    run = 0
 
-    i = 0
-    while i < len(args.train_size):
-        pct = args.train_size[i]
 
-        # ==== Slice and save subset ====
-        n = max(1, int(pct / 100 * total))
-        subset_filename = f"subset_{pct}pct.npy"
-        subset_path = os.path.join("datasets", subset_filename)
+    sweep_root     = os.path.join("sweep_results", args.dataset_name)
 
-        if not os.path.exists(subset_path):
-            print(f"Creating subset: {subset_filename} (n={n})")
-            np.save(subset_path, dataset[:n])
-        else:
-            print(f"Subset already exists: {subset_filename}")
+    master_csv     = os.path.join(sweep_root, "master_metrics.csv")
 
-        j = 0
-        while j < len(args.epoch_range):
-            epochs = args.epoch_range[j]
-            run += 1
-            print(f"\n{'='*60}")
-            print(f"[Run {run}/{total_runs}] model={args.model_size} | train={pct}% (n={n}) | epochs={epochs}")
-            print(f"{'='*60}\n")
+    models_root    = os.path.join(sweep_root, "models")
 
-            models_dataset_dir = os.path.join("models", args.dataset_name)
+    os.makedirs(sweep_root,  exist_ok=True)
 
-            if os.path.exists(models_dataset_dir):
-                shutil.rmtree(models_dataset_dir)
-            os.makedirs(models_dataset_dir, exist_ok=True)
+    os.makedirs(models_root, exist_ok=True)
 
-            command = [
-                "python", "scripts/finetune_MORPH_general.py",
-                "--dataset", subset_filename,
-                "--dataset_name", args.dataset_name,
-                "--dataset_specs", "2", "1", "1", "128", "128",
-                "--model_choice", "FM",
-                "--model_size", args.model_size,
-                "--ckpt_from", "FM",
-                "--download_model", # <-- Let the finetune script handle the download
-                "--ft_level1",
-                "--parallel", "no",
-                "--n_epochs", str(epochs),
-                "--patience", "10",
-                "--lr_scheduler",
-                "--rollout_horizon", str(args.rollout),
-                "--max_ar_order", str(args.max_ar_order)
-            ]
+    print(f"Master CSV will be written to: {master_csv}")
 
-            subprocess.run(command)
 
-            # ==== Create iteration results folder ====
-            run_folder = os.path.join(sweep_results_dir, f"{pct}percent",
-                                      f"{args.model_size}_{pct}percent_{epochs}epochs")
-            os.makedirs(run_folder, exist_ok=True)
 
-            for d in watched_dirs:
-                if os.path.exists(d):
-                    # ==== Filter for the best model only ====
-                    all_files = []
-                    for root, _, filenames in os.walk(d):
-                        for f in filenames:
-                            all_files.append(os.path.join(root, f))
+    # ----- Helper: compute n_traj from percentage -----
 
-                    # ==== Isolate .pth files to find the "best" one ====
-                    pth_files = [f for f in all_files if f.endswith('.pth')]
+    def traj_for_pct(pct):
 
-                    if pth_files:
-                        best_model = sorted(pth_files, key=lambda x: os.path.getmtime(x))[-1]
+        n = max(1, int(pct / 100 * total_samples))
 
-                        # ==== Remove all other .pth files so they aren't copied ====
-                        for pth in pth_files:
-                            if pth != best_model:
-                                os.remove(pth)
+        print(f"  Data {pct}% → {n} trajectories")
 
-                    # ==== Copy the remaining files (Best Model + Metrics + Plots) ====
-                    for root, _, filenames in os.walk(d):
-                        for f in filenames:
-                            src_path = os.path.join(root, f)
-                            shutil.copy2(src_path, run_folder)
+        return n
 
-                    shutil.rmtree(d)
-                    os.makedirs(d, exist_ok=True)
-            j += 1
-        i += 1
 
-    print(f"\nSweep complete. {total_runs} runs finished. Results in {sweep_results_dir}/")
+
+    # ----- Helper: build the base finetune command -----
+
+    def base_command(n_traj, pct, n_ep, checkpoint_every=0):
+
+        cmd = [
+
+            "python", "scripts/finetune_MORPH_general.py",
+
+            "--dataset",       args.dataset,
+
+            "--dataset_name",  args.dataset_name,
+
+            "--dataset_specs", str(args.dataset_specs[0]), str(args.dataset_specs[1]),
+
+                               str(args.dataset_specs[2]), str(args.dataset_specs[3]),
+
+                               str(args.dataset_specs[4]),
+
+            "--model_choice",  "FM",
+
+            "--model_size",    args.model_size,
+
+            "--ckpt_from",     "FM",
+
+            "--download_model",
+
+            "--ft_level1",
+
+            "--parallel",      "no",
+
+            "--n_epochs",      str(n_ep),
+
+            "--n_traj",        str(n_traj),
+
+            "--patience",      str(args.patience),
+
+            "--lr_scheduler",
+
+            "--rollout_horizon", str(args.rollout),
+
+            "--max_ar_order",  str(args.max_ar_order),
+
+            "--sweep_mode",                        # suppress all PNGs
+
+            "--train_pct",     str(pct),           # for CSV logging
+
+            "--master_csv_path", master_csv,       # single master CSV
+
+        ]
+
+        if checkpoint_every > 0:
+
+            cmd += ["--checkpoint_every", str(checkpoint_every)]
+
+        return cmd
+
+
+
+    # ==================================================================
+
+    # FRACTION MODE
+
+    # Outer loop: data percentages
+
+    # Each run trains to n_epochs, saves best .pth to models/fraction_sweep/
+
+    # ==================================================================
+
+    if args.sweep_mode == "fraction":
+
+        if not args.train_sizes:
+
+            raise ValueError("--train_sizes is required for fraction mode")
+
+
+
+        best_model_dir = os.path.join(models_root, args.model_size, "fraction_sweep")
+
+        os.makedirs(best_model_dir, exist_ok=True)
+
+
+
+        print(f"\n{'='*60}")
+
+        print(f"FRACTION SWEEP | model={args.model_size} | "
+
+              f"epochs={args.n_epochs} | sizes={args.train_sizes}")
+
+        print(f"{'='*60}\n")
+
+
+
+        for i, pct in enumerate(args.train_sizes):
+
+            print(f"\n[{i+1}/{len(args.train_sizes)}] Data={pct}% | Epochs={args.n_epochs}")
+
+
+
+            n_traj = traj_for_pct(pct)
+
+            cmd = base_command(n_traj, pct, args.n_epochs, checkpoint_every=0)
+
+            cmd += ["--best_model_dir", best_model_dir]
+
+
+
+            print(f"  Running: {' '.join(cmd)}\n")
+
+            subprocess.run(cmd, check=True)
+
+
+
+            print(f"  Done: {pct}% data run complete.")
+
+
+
+        print(f"\nFraction sweep complete. {len(args.train_sizes)} runs finished.")
+
+        print(f"Models saved to: {best_model_dir}/")
+
+        print(f"Metrics in:      {master_csv}")
+
+
+
+    # ==================================================================
+
+    # EPOCH MODE
+
+    # Single data %, train to max_epochs, checkpoint every N epochs
+
+    # Saves one .pth per checkpoint to models/epoch_sweep/
+
+    # ==================================================================
+
+    elif args.sweep_mode == "epochs":
+
+        best_model_dir = os.path.join(models_root, args.model_size, "epoch_sweep")
+
+        os.makedirs(best_model_dir, exist_ok=True)
+
+
+
+        pct = args.train_pct
+
+        print(f"\n{'='*60}")
+
+        print(f"EPOCH SWEEP | model={args.model_size} | data={pct}% | "
+
+              f"max_epochs={args.max_epochs} | checkpoint_every={args.checkpoint_every}")
+
+        print(f"{'='*60}\n")
+
+
+
+        n_traj = traj_for_pct(pct)
+
+        cmd = base_command(n_traj, pct, args.max_epochs,
+
+                           checkpoint_every=args.checkpoint_every)
+
+        cmd += ["--best_model_dir", best_model_dir]
+
+
+
+        print(f"Running: {' '.join(cmd)}\n")
+
+        subprocess.run(cmd, check=True)
+
+
+
+        n_checkpoints = args.max_epochs // args.checkpoint_every
+
+        print(f"\nEpoch sweep complete. Up to {n_checkpoints} checkpoints saved.")
+
+        print(f"Models saved to: {best_model_dir}/")
+
+        print(f"Metrics in:      {master_csv}")
+
+
+
+
 
 if __name__ == '__main__':
+
     main()
